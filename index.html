@@ -180,14 +180,29 @@ async function loadTrash(){
  const cutoff=new Date(Date.now()-2592000000).toISOString();
  let q=db.from('audit_log').select('id,table_name,record_id,old_data,created_at').eq('action','DELETE').in('table_name',trashTables).gt('created_at',cutoff).order('created_at',{ascending:false}).order('id',{ascending:false});
  if($('trashType').value)q=q.eq('table_name',$('trashType').value);
- const {data,error}=await q.range(trashPage*50,trashPage*50+50);
+ const pending=[],seen=new Set();
+ for(let offset=0;;offset+=100){
+ const {data,error}=await q.range(offset,offset+99);
  if(version!==trashVersion||profile?.id!==actor||!staffManager())return;if(error)throw error;
- const page=data.slice(0,50);out.textContent=page.length?`עמוד ${trashPage+1} · ${page.length} רשומות`:'אין רשומות זמינות לשחזור';$('trashPrev').disabled=trashPage===0;$('trashNext').disabled=data.length<=50;
+ const batch=data||[];
+ const checks=await Promise.all(trashTables.map(async table=>{
+ const ids=[...new Set(batch.filter(r=>r.table_name===table).map(r=>String(r.old_data?.id||r.record_id)))];
+ if(!ids.length)return [table,new Set()];
+ const {data,error}=await db.from(table).select('id').in('id',ids);if(error)throw error;
+ return [table,new Set((data||[]).map(r=>String(r.id)))];
+ }));
+ if(version!==trashVersion||profile?.id!==actor||!staffManager())return;
+ const existing=Object.fromEntries(checks);
+ for(const r of batch){const id=String(r.old_data?.id||r.record_id),key=r.table_name+':'+id;if(seen.has(key))continue;seen.add(key);if(!existing[r.table_name].has(id))pending.push(r);}
+ if(batch.length<100)break;
+ }
+ trashPage=Math.min(trashPage,Math.max(0,Math.ceil(pending.length/50)-1));
+ const page=pending.slice(trashPage*50,trashPage*50+50);out.textContent=page.length?`עמוד ${trashPage+1} · ${page.length} רשומות`:'אין רשומות זמינות לשחזור';$('trashPrev').disabled=trashPage===0;$('trashNext').disabled=pending.length<=(trashPage+1)*50;
  for(const r of page){
  const d=r.old_data||{},name=d.name||d.full_name||d.title||[d.variety,d.planting_date||d.irrigation_date].filter(Boolean).join(' · ')||r.record_id||'—';
  const expires=Date.parse(r.created_at)+2592000000,days=Math.max(0,Math.ceil((expires-Date.now())/86400000));
  const tr=document.createElement('tr');tr.innerHTML=`<td>${esc(auditNames[r.table_name])}</td><td>${esc(name)}</td><td>${esc(new Date(r.created_at).toLocaleString('he-IL'))}</td><td>${days} ימים<small>עד ${esc(new Date(expires).toLocaleString('he-IL'))}</small></td><td><button type="button">שחזר</button></td>`;rows.appendChild(tr);
- const b=tr.querySelector('button');const active={fields,plantings,tasks,irrigations}[r.table_name];if(active?.some(x=>String(x.id)===String(r.record_id))){b.disabled=true;b.textContent='כבר קיים';}
+ const b=tr.querySelector('button');
  b.onclick=async()=>{if(trashBusy||!staffManager()||profile?.id!==actor||version!==trashVersion)return;if(Date.now()>=expires){await loadTrash();return;}if(!confirm('לשחזר את '+name+'? רשומות קשורות אינן משוחזרות אוטומטית. יש לשחזר רשומות אב לפני רשומות תלויות.'))return;
  trashBusy=true;b.disabled=true;out.textContent='משחזר...';try{const {data,error}=await db.rpc('restore_deleted_record',{p_audit_id:r.id});if(error)throw error;if(!data)throw new Error('לא התקבל אישור שחזור');if(profile?.id!==actor||!staffManager())return;await refresh();await loadTrash();if(profile?.id===actor)out.textContent='הרשומה שוחזרה בהצלחה';}catch(e){if(profile?.id===actor)out.textContent='השחזור נכשל: '+e.message;}finally{trashBusy=false;if(b.isConnected)b.disabled=false;}};
  }
